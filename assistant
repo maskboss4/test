@@ -1,0 +1,188 @@
+import os
+import io
+import re  # Import regular expression module
+import openai  # Keep OpenAI code for reference
+from groq import Groq
+from dotenv import load_dotenv
+from google.cloud import texttospeech
+import time
+import pygame.mixer  # Only import the mixer module to avoid display initialization
+import speech_recognition as sr
+import numpy as np
+from gtts import gTTS
+import requests  # Import requests for Groq API calls
+
+os.environ["SDL_AUDIODRIVER"] = "alsa"  # Use ALSA for audio playback
+
+# Initialize pygame mixer for audio playback with ALSA
+pygame.mixer.init(frequency=22050, size=8, channels=1, buffer=512)
+
+load_dotenv()
+
+# Define the path to your Google Cloud credentials JSON file
+credentials_path = '/home/maskboss/sa_text2speech.json'
+# Set the GOOGLE_APPLICATION_CREDENTIALS environment variable
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = credentials_path
+os.environ["GROQ_API_KEY"] = "****"
+
+# GROQ API
+Gclient = Groq(
+    api_key=os.environ.get("GROQ_API_KEY"),
+)
+
+# Set up the speech recognition and text-to-speech engines
+r = sr.Recognizer()
+language = "en-US"
+client = texttospeech.TextToSpeechClient()
+voice = texttospeech.VoiceSelectionParams(
+    language_code=language,
+    name="en-US-Studio-O"
+)
+
+audio_config = texttospeech.AudioConfig(
+    audio_encoding=texttospeech.AudioEncoding.MP3,
+    effects_profile_id=['small-bluetooth-speaker-class-device'],
+    speaking_rate=1,
+    pitch=1
+)
+
+name = "Pedro"
+greetings = [f"whats up master {name}",
+             "yoh! wassup!", 
+             "Well, hello there!"]
+
+# Define a single start_time variable globally
+start_time = time.time()
+
+# Flag to indicate when the system is speaking
+is_speaking = False
+
+
+def play_audio(audio_content):
+    global is_speaking
+
+    # Load the audio content into a memory buffer
+    audio_stream = io.BytesIO(audio_content)
+    
+    # Create a Sound object
+    sound = pygame.mixer.Sound(audio_stream)
+    
+    # Play the sound
+    channel = sound.play()
+    
+    # Wait until the sound has finished playing
+    while channel.get_busy():
+        pygame.time.wait(100)  # Wait for 100 milliseconds
+
+def generate_speech(source):
+    """Generate and play speech with a delay until playback is complete."""
+    # Speak the response
+    synth = texttospeech.SynthesisInput(text=source)
+
+    synth_response = client.synthesize_speech(
+        input=synth,
+        voice=voice,
+        audio_config=audio_config
+    )
+
+    # Calculate and print the time elapsed
+    response_elapsed = time.time() - start_time
+    print(f"Time elapsed for response: {response_elapsed:.2f} seconds")
+    
+    # Play audio (blocks until playback completes)
+    play_audio(synth_response.audio_content)
+
+def listen_for_wake_word(source):
+
+    while True:
+        # Continuously wait until speaking is finished before listening
+        while pygame.mixer.get_busy():
+            pygame.time.wait(100)
+
+        try:
+            audio = r.listen(source)
+            text = r.recognize_google(audio)
+            if "hey steve" in text.lower():
+                print("Wake word detected.")
+
+                # Start timing the greeting response
+                global start_time
+                start_time = time.time()
+                
+                generate_speech(np.random.choice(greetings))
+
+                listen_and_respond(source)
+                break
+        except sr.UnknownValueError:
+            pass
+
+def listen_and_respond(source):
+    while True:
+        # Continuously wait until speaking is finished before listening
+        while pygame.mixer.get_busy():
+            pygame.time.wait(100)
+
+        print("Listening for a response...")
+
+        try:
+            audio = r.listen(source)
+            text = r.recognize_google(audio)
+            print(f"You said: {text}")
+
+            # If something was heard, process the response
+            if text:
+                # Start timing the Groq response
+                global start_time
+                start_time = time.time()
+
+                # Send input to Groq API
+                response = Gclient.chat.completions.create(
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "virtual assistant"
+                        },
+                        {
+                            "role": "user",
+                            "content": text,
+                        },
+                    ],
+                    model="llama3-8b-8192",
+                )
+
+                # Correct way to access the content of the response
+                response_text = response.choices[0].message.content
+                
+
+                # Calculate and print the time elapsed for Groq response
+                response_elapsed = time.time() - start_time
+                print(f"Time elapsed for Groq response: {response_elapsed:.2f} seconds")
+
+                # Reset timing
+                start_time = time.time()
+
+                # Remove text within asterisks
+                response_text = re.sub(r'\*.*?\*', '', response_text)
+                
+                # Replace all periods with exclamation marks for expressive speech
+                response_text = response_text.replace('.', '!')
+                print(f"Groq response: {response_text}")
+
+                generate_speech(response_text)
+
+        except sr.WaitTimeoutError:
+            # If no response detected within the 4-second window
+            print("Silence found, returning to wake word listening...")
+            listen_for_wake_word(source)
+            break
+        except sr.UnknownValueError:
+            print("Could not understand audio.")
+        except sr.RequestError as e:
+            print(f"Could not request results; {e}")
+            generate_speech(f"Could not request results; {e}")
+            listen_for_wake_word(source)
+            break
+
+# Use the default microphone as the audio source
+with sr.Microphone() as source:
+    listen_for_wake_word(source)
